@@ -1,4 +1,5 @@
 .DS_Store
 .claude/
+.mcp.json
 *.env
 .env.*

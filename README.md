@@ -1,4 +1,4 @@
-# GoodScore — Ad Variable Extraction Pipeline
+# Ad Variable Extraction Pipeline
 
 > End-to-end n8n pipeline that samples video frames from Cloudinary, sends them to Claude Vision, passes the script to Claude Text, and writes 10 structured creative performance variables back to Google Sheets — fully automated.
 
@@ -11,7 +11,7 @@
 
 ## Problem Statement
 
-GoodScore's performance marketing team runs video ads targeting Tier-2 and Tier-3 users across platforms in India. Evaluating creative performance requires understanding *why* a particular ad worked — what hook style was used, whether a face appeared in the first frames, what emotional tone the script carried, and whether a clear CTA was present.
+Performance marketing teams run video ads across multiple platforms. Evaluating creative performance requires understanding *why* a particular ad worked — what hook style was used, whether a face appeared in the first frames, what emotional tone the script carried, and whether a clear CTA was present.
 
 Manually tagging these attributes across dozens of ads is slow, inconsistent, and doesn't scale. This pipeline automates the entire analysis: from raw video in Cloudinary to a structured, analyst-ready output row in Google Sheets — triggered the moment a new ad is added.
 
@@ -151,7 +151,7 @@ Create a Google Sheet with two tabs:
 | Column | Description |
 |--------|-------------|
 | `ad_id` | Unique identifier for the ad (e.g. `ad_001`) |
-| `video_url` | Cloudinary **public ID only** — not a full URL (e.g. `goodscore/ads/ad_001`) |
+| `video_url` | Cloudinary **public ID only** — not a full URL (e.g. `my-brand/ads/ad_001`) |
 | `script` | Full ad script text (Hindi, English, or Hinglish) |
 | `success` | Optional performance label (e.g. win / loss) |
 | `status` | Set to `pending` for rows to be processed |
@@ -164,7 +164,7 @@ Note your Sheet ID from the URL: `https://docs.google.com/spreadsheets/d/YOUR_SH
 
 ### Step 2 — Import the Workflow
 
-In n8n: **Workflows → Import from file**, select `workflows/goodscore_ad_variable_extraction.json`.
+In n8n: **Workflows → Import from file**, select `workflows/ad_variable_extraction.json`.
 
 ### Step 3 — Configure Placeholders
 
@@ -233,11 +233,11 @@ Each processed ad produces one row in Sheet2:
 ## Repository Structure
 
 ```
-goodscore-ad-variable-extraction/
+ad-variable-extraction/
 ├── README.md                                       ← This file
 ├── .gitignore
 ├── workflows/
-│   └── goodscore_ad_variable_extraction.json       ← n8n workflow (import this)
+│   └── ad_variable_extraction.json       ← n8n workflow (import this)
 └── scripts/
     └── frame_timestamps.js                         ← Standalone frame timestamp calculator + self-test
 ```

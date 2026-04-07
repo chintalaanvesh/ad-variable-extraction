@@ -1,5 +1,5 @@
 /**
- * GoodScore — Frame Timestamp Calculator
+ * Frame Timestamp Calculator
  *
  * Given a video duration (seconds), returns a sorted, deduplicated array
  * of timestamps (seconds) to extract frames from.
