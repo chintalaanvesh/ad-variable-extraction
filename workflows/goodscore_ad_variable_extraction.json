@@ -1,0 +1,378 @@
+{
+  "name": "GoodScore - Ad Variable Extraction",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Sheet1",
+          "mode": "name"
+        },
+        "event": "rowAdded",
+        "options": {}
+      },
+      "id": "node_sheets_trigger",
+      "name": "Read Pending Rows",
+      "type": "n8n-nodes-base.googleSheetsTrigger",
+      "typeVersion": 1,
+      "position": [400, 32],
+      "credentials": {
+        "googleSheetsTriggerOAuth2Api": {
+          "name": "google-sheets-trigger-oauth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "id": "node_loop_over_rows",
+      "name": "Loop Over Rows",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [640, 112]
+    },
+    {
+      "parameters": {
+        "url": "={{ \"https://api.cloudinary.com/v1_1/YOUR_CLOUDINARY_CLOUD_NAME/resources/video/upload/\" + $json.video_url + \"?media_metadata=true\" }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Basic YOUR_CLOUDINARY_KEY_SECRET_BASE64"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "node_cloudinary_metadata",
+      "name": "Fetch Video Metadata",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [832, 320]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── Frame Timestamp Calculator ──────────────────────────────────────────\n// $input = Cloudinary Admin API response (per video)\n// Duration source priority:\n//   1. item.json.duration          — present when Cloudinary processes video codec\n//   2. item.json.media_metadata.Duration — fallback string from ?media_metadata=true\n// $('Read Pending Rows').item.json = original Google Sheets row (paired by index)\n\nfunction calculateFrameTimestamps(duration) {\n  duration = Math.floor(duration);\n\n  if (duration < 8) {\n    const mid = Math.floor(duration / 2);\n    return [...new Set([0, mid, Math.max(0, duration - 1)])].sort((a, b) => a - b);\n  }\n\n  let interval;\n  if (duration <= 15)      interval = 3;\n  else if (duration <= 30) interval = 5;\n  else if (duration <= 60) interval = 7;\n  else                     interval = 10;\n\n  const anchors = [0, 3, duration - 1];\n  const middle = [];\n  for (let t = 5; t <= duration - 2; t += interval) middle.push(t);\n\n  let timestamps = [...new Set([...anchors, ...middle])].sort((a, b) => a - b);\n\n  if (timestamps.length > 12) {\n    const last = timestamps[timestamps.length - 1];\n    timestamps = timestamps.slice(0, 11);\n    if (!timestamps.includes(last)) timestamps.push(last);\n  }\n\n  return timestamps;\n}\n\nconst results = [];\n\nfor (const item of $input.all()) {\n  const sheets = $('Read Pending Rows').item.json;\n\n  const duration =\n    Number(item.json.duration) ||\n    Number(item.json.media_metadata?.Duration) ||\n    0;\n\n  const timestamps  = duration > 0 ? calculateFrameTimestamps(duration) : [];\n\n  results.push({\n    json: {\n      ad_id:       sheets.ad_id,\n      video_url:   sheets.video_url,\n      script:      sheets.script,\n      success:     sheets.success,\n      status:      sheets.status,\n      duration,\n      timestamps,\n      frame_count: timestamps.length,\n    }\n  });\n}\n\nreturn results;\n"
+      },
+      "id": "node_frame_timestamps",
+      "name": "Calculate Frame Timestamps",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1072, 320]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── Split timestamps array into one item per frame ────────────────────────\n// Input:  single item with timestamps[] array\n// Output: N items, one per timestamp, each carrying frame_url + full context\n\nconst item = $input.first().json;\n\nconst results = item.timestamps.map(ts => ({\n  json: {\n    ad_id:       item.ad_id,\n    video_url:   item.video_url,\n    script:      item.script,\n    success:     item.success,\n    status:      item.status,\n    duration:    item.duration,\n    timestamps:  item.timestamps,\n    frame_count: item.frame_count,\n    timestamp:   ts,\n    frame_url:   `https://res.cloudinary.com/YOUR_CLOUDINARY_CLOUD_NAME/video/upload/so_${ts}/${item.video_url}.jpg`,\n  }\n}));\n\nreturn results;\n"
+      },
+      "id": "node_split_timestamps",
+      "name": "Split Timestamps",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1328, 320]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.frame_url }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file",
+              "outputPropertyName": "frame_binary"
+            }
+          }
+        }
+      },
+      "id": "node_fetch_frame",
+      "name": "Fetch Frame",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1584, 320]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── Collect frame URLs after loop ─────────────────────────────────────────\n// $input items = HTTP responses (binary JPEG, one per frame)\n// $('Split Timestamps').all() = original items with frame_url strings\n\nconst splitItems = $('Split Timestamps').all();\nconst frame_urls = splitItems.map(item => item.json.frame_url);\nconst ctx = splitItems[0].json;\n\nreturn [{\n  json: {\n    ad_id:       ctx.ad_id,\n    video_url:   ctx.video_url,\n    script:      ctx.script,\n    success:     ctx.success,\n    status:      ctx.status,\n    duration:    ctx.duration,\n    timestamps:  ctx.timestamps,\n    frame_count: ctx.frame_count,\n    frame_urls:  frame_urls,\n  }\n}];\n"
+      },
+      "id": "node_collect_frame_urls",
+      "name": "Collect Frame URLs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1824, 320]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── Build Claude Vision API request body ─────────────────────────────────\nconst item = $input.first().json;\n\nconst VISION_PROMPT = `You are an expert video analyst for a fintech advertising company in India called GoodScore.\nGoodScore is a credit scoring app targeting Tier-2 and Tier-3 users in India.\n\nYou will be shown between 6 and 12 frames from a single advertisement video,\nsampled at regular intervals from start to finish.\nFrames are ordered chronologically. The first 2 frames are the opening/hook.\nThe last frame is the closing. All others are middle frames.\nAnalyze all frames together as a complete narrative before extracting attributes.\n\nRespond ONLY in valid JSON. No explanation, no preamble, no markdown.\n\n{\n  \"hook_type\": \"question\" / \"bold_statement\" / \"visual_shock\" / \"person_speaking\" / \"text_only\",\n  \"face_in_hook\": true/false,\n  \"eye_contact_in_hook\": true/false,\n  \"scene_setup\": \"person_to_cam\" / \"skit\" / \"skit_p2c\" / \"b_roll\" / \"b_roll_long\",\n  \"subtitle_present\": true/false\n}\n\nRules:\n- Use null for any attribute you cannot determine with reasonable confidence\n- hook_type and face_in_hook must be based on the FIRST TWO frames only`;\n\nconst imageBlocks = item.frame_urls.map(url => ({\n  type: 'image',\n  source: { type: 'url', url }\n}));\n\nreturn [{\n  json: {\n    ad_id:       item.ad_id,\n    video_url:   item.video_url,\n    script:      item.script,\n    success:     item.success,\n    status:      item.status,\n    duration:    item.duration,\n    timestamps:  item.timestamps,\n    frame_count: item.frame_count,\n    frame_urls:  item.frame_urls,\n    request_body: {\n      model: 'claude-sonnet-4-6',\n      max_tokens: 1024,\n      messages: [{\n        role: 'user',\n        content: [\n          ...imageBlocks,\n          { type: 'text', text: VISION_PROMPT }\n        ]\n      }]\n    }\n  }\n}];\n"
+      },
+      "id": "node_build_vision_payload",
+      "name": "Build Vision Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2080, 128]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-api-key",
+              "value": "YOUR_ANTHROPIC_API_KEY"
+            },
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.request_body) }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "node_claude_vision",
+      "name": "Claude Vision API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2320, 128],
+      "retryOnFail": true,
+      "maxTries": 5,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "amount": 65
+      },
+      "id": "node_rate_limit_wait",
+      "name": "Wait 65s (Rate Limit)",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [2560, 128]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── Build Claude Text API request body ──────────────────────────────────\nconst ctx = $('Build Vision Payload').first().json;\n\nconst SCRIPT_PROMPT = `You are an expert advertising analyst for a fintech company in India called GoodScore.\nGoodScore is a credit scoring app targeting Tier-2 and Tier-3 users in India.\n\nYou will be given the pre-written script of a video advertisement.\nThe script may be in Hindi, English, or Hinglish (code-mixed).\n\nRespond ONLY in valid JSON. No explanation, no preamble, no markdown.\n\nSCRIPT:\n\"\"\"\n${ctx.script}\n\"\"\"\n\n{\n  \"emotional_tone\": \"urgency\" / \"fear\" / \"aspiration\" / \"humor\" / \"trust\" / \"empathy\",\n  \"hook_addresses_pain\": true/false,\n  \"social_proof_present\": true/false,\n  \"cta_type\": \"download_app\" / \"check_score\" / \"call_now\" / \"visit_website\" / \"none\",\n  \"language_primary\": \"hindi\" / \"english\" / \"hinglish\"\n}\n\nRules:\n- If you cannot determine an attribute, use null\n- emotional_tone: pick the single dominant tone`;\n\nreturn [{\n  json: {\n    ad_id:       ctx.ad_id,\n    video_url:   ctx.video_url,\n    script:      ctx.script,\n    success:     ctx.success,\n    status:      ctx.status,\n    duration:    ctx.duration,\n    timestamps:  ctx.timestamps,\n    frame_count: ctx.frame_count,\n    frame_urls:  ctx.frame_urls,\n    request_body: {\n      model: 'claude-sonnet-4-6',\n      max_tokens: 1024,\n      messages: [{\n        role: 'user',\n        content: SCRIPT_PROMPT\n      }]\n    }\n  }\n}];\n"
+      },
+      "id": "node_build_script_payload",
+      "name": "Build Script Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2080, 528]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-api-key",
+              "value": "YOUR_ANTHROPIC_API_KEY"
+            },
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.request_body) }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "node_claude_text",
+      "name": "Claude Text API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2320, 528],
+      "retryOnFail": true,
+      "maxTries": 5,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── Merge & Validate ──────────────────────────────────────────────────────────\nfunction parseClaudeResponse(apiJson) {\n  const raw = apiJson?.content?.[0]?.text;\n  if (!raw) throw new Error('Empty content field in Claude API response');\n  const cleaned = raw\n    .replace(/^```(?:json)?\\s*/i, '')\n    .replace(/\\s*```\\s*$/, '')\n    .trim();\n  return JSON.parse(cleaned);\n}\n\nconst visionApiJson = $('Claude Vision API').first().json;\nconst scriptApiJson = $('Claude Text API').first().json;\nconst ctx           = $('Build Vision Payload').first().json;\nconst sheetsRow     = $('Read Pending Rows').first().json;\n\nconst errors = [];\nlet visual_vars = {};\nlet script_vars = {};\n\ntry {\n  visual_vars = parseClaudeResponse(visionApiJson);\n} catch (e) {\n  errors.push('vision_parse_error: ' + e.message);\n}\n\ntry {\n  script_vars = parseClaudeResponse(scriptApiJson);\n} catch (e) {\n  errors.push('script_parse_error: ' + e.message);\n}\n\nconst merged = {\n  ad_id:            ctx.ad_id,\n  duration_seconds: ctx.duration,\n  frame_count:      ctx.frame_count,\n  processed_at:     new Date().toISOString(),\n  hook_type:             visual_vars.hook_type             ?? null,\n  face_in_hook:          visual_vars.face_in_hook          ?? null,\n  eye_contact_in_hook:   visual_vars.eye_contact_in_hook   ?? null,\n  scene_setup:           visual_vars.scene_setup           ?? null,\n  subtitle_present:      visual_vars.subtitle_present      ?? null,\n  emotional_tone:        script_vars.emotional_tone        ?? null,\n  hook_addresses_pain:   script_vars.hook_addresses_pain   ?? null,\n  cta_type:              script_vars.cta_type              ?? null,\n  social_proof_present:  script_vars.social_proof_present  ?? null,\n  language_primary:      script_vars.language_primary      ?? null,\n};\n\nconst ALLOWED = {\n  hook_type:           ['question', 'bold_statement', 'person_speaking', 'text_only', 'visual_shock'],\n  face_in_hook:        [true, false],\n  eye_contact_in_hook: [true, false],\n  scene_setup:         ['person_to_cam', 'skit', 'skit_p2c', 'b_roll', 'b_roll_long'],\n  subtitle_present:    [true, false],\n  emotional_tone:      ['urgency', 'aspiration', 'humor', 'trust', 'empathy', 'fear'],\n  hook_addresses_pain: [true, false],\n  cta_type:            ['check_score_free', 'check_score', 'download_app', 'call_now', 'visit_website', 'none'],\n  social_proof_present:[true, false],\n  language_primary:    ['hindi', 'english', 'hinglish'],\n};\n\nfor (const [field, allowed] of Object.entries(ALLOWED)) {\n  const val = merged[field];\n  if (val === null) continue;\n  if (val === undefined) {\n    errors.push(field + ': missing from Claude response');\n  } else if (!allowed.includes(val)) {\n    errors.push(field + ': unexpected value \"' + val + '\" (allowed: ' + allowed.join(', ') + ')');\n  }\n}\n\nmerged.status       = errors.length > 0 ? 'error' : 'done';\nmerged.error_detail = errors.join(' | ');\nmerged.row_number   = sheetsRow.row_number;\n\nreturn [{ json: merged }];\n"
+      },
+      "id": "node_merge_validate",
+      "name": "Merge & Validate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2576, 528]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Sheet2",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [
+            { "id": "ad_id", "displayName": "ad_id", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "duration_seconds", "displayName": "duration_seconds", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "frame_count", "displayName": "frame_count", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "processed_at", "displayName": "processed_at", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "hook_type", "displayName": "hook_type", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "face_in_hook", "displayName": "face_in_hook", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "eye_contact_in_hook", "displayName": "eye_contact_in_hook", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "scene_setup", "displayName": "scene_setup", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "subtitle_present", "displayName": "subtitle_present", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "emotional_tone", "displayName": "emotional_tone", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "hook_addresses_pain", "displayName": "hook_addresses_pain", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "cta_type", "displayName": "cta_type", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "social_proof_present", "displayName": "social_proof_present", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "language_primary", "displayName": "language_primary", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "status", "displayName": "status", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "error_detail", "displayName": "error_detail", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "node_append_output",
+      "name": "Append to Output Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [2832, 304],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "name": "google-sheets-oauth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Sheet1",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {
+            "ad_id": "={{ $json.ad_id }}",
+            "status": "={{ $json.status }}"
+          },
+          "matchingColumns": ["ad_id"],
+          "schema": [
+            { "id": "ad_id", "displayName": "ad_id", "type": "string", "display": true, "canBeUsedToMatch": true, "defaultMatch": true },
+            { "id": "status", "displayName": "status", "type": "string", "display": true, "canBeUsedToMatch": false }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "node_update_input_status",
+      "name": "Update Input Status",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [3072, 304],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "name": "google-sheets-oauth"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Read Pending Rows": {
+      "main": [[{ "node": "Loop Over Rows", "type": "main", "index": 0 }]]
+    },
+    "Loop Over Rows": {
+      "main": [
+        [],
+        [{ "node": "Fetch Video Metadata", "type": "main", "index": 0 }]
+      ]
+    },
+    "Fetch Video Metadata": {
+      "main": [[{ "node": "Calculate Frame Timestamps", "type": "main", "index": 0 }]]
+    },
+    "Calculate Frame Timestamps": {
+      "main": [[{ "node": "Split Timestamps", "type": "main", "index": 0 }]]
+    },
+    "Split Timestamps": {
+      "main": [[{ "node": "Fetch Frame", "type": "main", "index": 0 }]]
+    },
+    "Fetch Frame": {
+      "main": [[{ "node": "Collect Frame URLs", "type": "main", "index": 0 }]]
+    },
+    "Collect Frame URLs": {
+      "main": [[{ "node": "Build Vision Payload", "type": "main", "index": 0 }]]
+    },
+    "Build Vision Payload": {
+      "main": [[{ "node": "Claude Vision API", "type": "main", "index": 0 }]]
+    },
+    "Claude Vision API": {
+      "main": [[{ "node": "Wait 65s (Rate Limit)", "type": "main", "index": 0 }]]
+    },
+    "Wait 65s (Rate Limit)": {
+      "main": [[{ "node": "Build Script Payload", "type": "main", "index": 0 }]]
+    },
+    "Build Script Payload": {
+      "main": [[{ "node": "Claude Text API", "type": "main", "index": 0 }]]
+    },
+    "Claude Text API": {
+      "main": [[{ "node": "Merge & Validate", "type": "main", "index": 0 }]]
+    },
+    "Merge & Validate": {
+      "main": [[{ "node": "Append to Output Sheet", "type": "main", "index": 0 }]]
+    },
+    "Append to Output Sheet": {
+      "main": [[{ "node": "Update Input Status", "type": "main", "index": 0 }]]
+    },
+    "Update Input Status": {
+      "main": [[{ "node": "Loop Over Rows", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true
+  },
+  "tags": []
+}
