@@ -49,6 +49,10 @@ flowchart TD
     B -->|all done| Z([Pipeline complete])
 ```
 
+## Workflow Canvas
+
+![Ad Variable Extraction — n8n Workflow](assets/workflow.png)
+
 ---
 
 ## Node Breakdown
